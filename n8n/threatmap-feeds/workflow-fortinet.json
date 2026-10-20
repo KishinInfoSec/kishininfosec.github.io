@@ -1,0 +1,168 @@
+{
+  "name": "Threat map: Fortinet attack events",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "Run now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        480
+      ],
+      "id": "run-now"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "name": "Every minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "id": "every-minute"
+    },
+    {
+      "parameters": {
+        "url": "https://fortiguard.fortinet.com/api/threatmap/live/outbreak?outbreak_id=0&last_sec=90",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "n8n-threatmap/0.1 (threat-intel research)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Fortinet: live outbreak events",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        300
+      ],
+      "id": "fortinet-live-outbreak-events"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Flatten Fortinet's {kind: {bucket_ms: [event, ...]}} payload into one item\n// holding every event as a row for attack_events. Dedupe happens in SQL\n// (event_key = md5 of the raw event), so overlapping polls are harmless.\nconst payload = $input.first().json;\nconst rows = [];\n\nfor (const [kind, buckets] of Object.entries(payload)) {\n  if (!buckets || typeof buckets !== 'object' || Array.isArray(buckets)) continue;\n  for (const [bucketMs, events] of Object.entries(buckets)) {\n    if (!Array.isArray(events)) continue;\n    for (const e of events) {\n      rows.push({\n        event_ms: Number(bucketMs) || e.redis_ms,\n        kind,\n        signature: e.vuln_name ?? e.virus_name ?? e.name ?? null,\n        category: e.profile_type ?? null,\n        severity: e.severity ?? null,\n        outbreak_id: e.outbreak_id ?? null,\n        outbreak_tags: Array.isArray(e.outbreak_alert) ? e.outbreak_alert : [],\n        src_country: e.src_country ?? null,\n        src_city: e.src_city ?? null,\n        src_lat: e.src_lat ?? null,\n        src_lon: e.src_long ?? null,\n        dst_country: e.dest_country ?? null,\n        dst_city: e.dest_city ?? null,\n        dst_lat: e.dest_lat ?? null,\n        dst_lon: e.dest_long ?? null,\n        hits: e.count ?? 1,\n        raw: e,\n      });\n    }\n  }\n}\n\nreturn rows.length ? [{ json: { rows } }] : [];\n"
+      },
+      "name": "To rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        300
+      ],
+      "id": "to-rows"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with ins as (\n  insert into attack_events (event_key, source, event_at, kind, signature, category, severity,\n                             outbreak_id, outbreak_tags, src_country, src_city, src_lat, src_lon,\n                             dst_country, dst_city, dst_lat, dst_lon, hits, raw)\n  select md5(r.raw::text), 'fortinet', to_timestamp(r.event_ms / 1000.0), r.kind, r.signature,\n         r.category, r.severity, r.outbreak_id, r.outbreak_tags, r.src_country, r.src_city,\n         r.src_lat, r.src_lon, r.dst_country, r.dst_city, r.dst_lat, r.dst_lon,\n         coalesce(r.hits, 1), r.raw\n  from jsonb_to_recordset($1::jsonb) as r(event_ms bigint, kind text, signature text, category text,\n       severity text, outbreak_id text, outbreak_tags text[], src_country text, src_city text,\n       src_lat double precision, src_lon double precision, dst_country text, dst_city text,\n       dst_lat double precision, dst_lon double precision, hits integer, raw jsonb)\n  on conflict (event_key) do nothing\n  returning 1\n)\nselect count(*) as inserted from ins",
+        "options": {
+          "queryReplacement": "={{ [ JSON.stringify($json.rows) ] }}"
+        }
+      },
+      "name": "PG: insert events",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        660,
+        300
+      ],
+      "id": "pg-insert-events",
+      "credentials": {
+        "postgres": {
+          "id": "ThreatmapPg00001",
+          "name": "Threatmap Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Threat map: Fortinet attack events\n\nEvery minute, pulls the last 90 s of FortiGuard's public outbreak threat-map feed (the data behind fortiguard.fortinet.com/threat-map) into `attack_events`.\n\n- Events carry city-level source/destination geo and the IPS/AV signature, **no IPs**.\n- Polls overlap by 30 s; `event_key` (md5 of the raw event) drops repeats.\n- Undocumented endpoint: if it changes shape, *To rows* outputs nothing and the run still succeeds. Watch `ingest_health`.",
+        "height": 300,
+        "width": 560,
+        "color": 4
+      },
+      "name": "Read me",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -100
+      ],
+      "id": "read-me"
+    }
+  ],
+  "connections": {
+    "Every minute": {
+      "main": [
+        [
+          {
+            "node": "Fortinet: live outbreak events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fortinet: live outbreak events": {
+      "main": [
+        [
+          {
+            "node": "To rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "To rows": {
+      "main": [
+        [
+          {
+            "node": "PG: insert events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run now": {
+      "main": [
+        [
+          {
+            "node": "Fortinet: live outbreak events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all"
+  },
+  "tags": []
+}

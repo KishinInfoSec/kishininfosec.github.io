@@ -1,0 +1,31 @@
+---
+layout: default
+---
+<article class="template">
+  <p class="crumbs"><a href="{{ '/' | relative_url }}">templates</a> / <span class="kind kind-{{ page.kind }}">{{ page.kind }}</span></p>
+
+  {% assign files = site.static_files | where_exp: "f", "f.path contains page.dir" %}
+  {% if files.size > 0 %}
+  <section class="files">
+    <h2>Files</h2>
+    <ul>
+    {% for f in files %}
+      <li>
+        <code>{{ f.name }}</code>
+        <span class="actions">
+          {% if f.extname == ".json" %}<button class="copy" data-src="{{ f.path | relative_url }}">copy</button>{% endif %}
+          <a href="{{ f.path | relative_url }}">view</a>
+          <a href="{{ f.path | relative_url }}" download>download</a>
+        </span>
+      </li>
+    {% endfor %}
+    </ul>
+    {% if page.kind == "n8n" %}<p class="hint">Tip: copy a workflow and paste it straight onto an n8n canvas.</p>{% endif %}
+    {% if page.tested %}<p class="hint">Tested with {{ page.tested }}.</p>{% endif %}
+  </section>
+  {% endif %}
+
+  <div class="prose">
+{{ content }}
+  </div>
+</article>

@@ -1,0 +1,24 @@
+---
+layout: default
+---
+<section class="hero">
+  <h1>Homelab templates</h1>
+  <p>{{ site.description }}</p>
+</section>
+
+{% assign templates = site.pages | where: "layout", "template" | sort: "title" %}
+{% assign kinds = templates | group_by: "kind" | sort: "name" %}
+<section id="templates">
+{% for k in kinds %}
+  <h2 class="group"><span class="kind kind-{{ k.name }}">{{ k.name }}</span></h2>
+  <div class="cards">
+  {% for t in k.items %}
+    <a class="card" href="{{ t.url | relative_url }}">
+      <h3>{{ t.title }}</h3>
+      <p>{{ t.summary }}</p>
+      {% if t.tags %}<ul class="tags">{% for tag in t.tags %}<li>{{ tag }}</li>{% endfor %}</ul>{% endif %}
+    </a>
+  {% endfor %}
+  </div>
+{% endfor %}
+</section>

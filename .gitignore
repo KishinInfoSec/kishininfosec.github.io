@@ -1,0 +1,10 @@
+_site/
+.jekyll-cache/
+.jekyll-metadata
+.env
+.env.*
+*.key
+*.pem
+secrets/
+.claude/
+CLAUDE.md

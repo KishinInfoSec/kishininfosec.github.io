@@ -1,0 +1,530 @@
+{
+  "name": "Threat map: IP feeds",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "Run now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        480
+      ],
+      "id": "run-now"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "name": "Every hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "id": "every-hour"
+    },
+    {
+      "parameters": {
+        "url": "https://isc.sans.edu/api/sources/attacks/500?json",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "n8n-threatmap/0.1 (threat-intel research)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "name": "DShield: top attackers",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        300
+      ],
+      "id": "dshield-top-attackers",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://feodotracker.abuse.ch/downloads/ipblocklist.json",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "n8n-threatmap/0.1 (threat-intel research)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Feodo: C2 blocklist",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        300
+      ],
+      "id": "feodo-c2-blocklist",
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://lists.blocklist.de/lists/all.txt",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "n8n-threatmap/0.1 (threat-intel research)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "name": "blocklist.de: all",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        300
+      ],
+      "id": "blocklist.de-all",
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Combine the three IP feeds into one item of {source, ip, details} rows for\n// ip_sightings. A feed whose request failed carries an `error` field and is\n// skipped, so one vendor being down never blocks the others. IPv4 only.\nconst rows = new Map();\n\nfunction add(source, rawIp, details) {\n  const parts = String(rawIp ?? '').trim().split('.');\n  if (parts.length !== 4 || !parts.every((p) => /^\\d{1,3}$/.test(p) && Number(p) <= 255)) return;\n  // DShield sometimes zero-pads octets (079.124.059.078).\n  const ip = parts.map(Number).join('.');\n  rows.set(`${source}|${ip}`, { source, ip, details });\n}\n\nconst ok = (items) => items.filter((it) => !it.json.error);\n\nfor (const { json: d } of ok($('DShield: top attackers').all())) {\n  add('dshield', d.ip, { attacks: d.attacks, count: d.count, firstseen: d.firstseen, lastseen: d.lastseen });\n}\n\nfor (const { json: f } of ok($('Feodo: C2 blocklist').all())) {\n  add('feodo', f.ip_address, {\n    port: f.port, status: f.status, malware: f.malware, as_name: f.as_name,\n    country: f.country, first_seen: f.first_seen, last_online: f.last_online,\n  });\n}\n\nfor (const { json: b } of ok($('blocklist.de: all').all())) {\n  for (const line of String(b.data ?? '').split('\\n')) add('blocklistde', line, {});\n}\n\nconst counts = {};\nfor (const r of rows.values()) counts[r.source] = (counts[r.source] ?? 0) + 1;\n\nreturn rows.size ? [{ json: { counts, rows: [...rows.values()] } }] : [];\n"
+      },
+      "name": "Combine feeds",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        300
+      ],
+      "id": "combine-feeds"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with up as (\n  insert into ip_sightings (source, ip, details)\n  select distinct on (r.source, r.ip) r.source, r.ip::inet, coalesce(r.details, '{}')\n  from jsonb_to_recordset($1::jsonb) as r(source text, ip text, details jsonb)\n  on conflict (source, ip, seen_on)\n  do update set details = excluded.details, last_ingested_at = now()\n  returning source\n)\nselect source, count(*) as upserted from up group by source",
+        "options": {
+          "queryReplacement": "={{ [ JSON.stringify($json.rows) ] }}"
+        }
+      },
+      "name": "PG: upsert sightings",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1100,
+        300
+      ],
+      "id": "pg-upsert-sightings",
+      "credentials": {
+        "postgres": {
+          "id": "ThreatmapPg00001",
+          "name": "Threatmap Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with ev as (delete from attack_events where event_at < now() - interval '30 days' returning 1),\n     si as (delete from ip_sightings where seen_on < current_date - 90 returning 1)\nselect (select count(*) from ev) as events_deleted, (select count(*) from si) as sightings_deleted",
+        "options": {}
+      },
+      "name": "PG: retention",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1320,
+        300
+      ],
+      "id": "pg-retention",
+      "credentials": {
+        "postgres": {
+          "id": "ThreatmapPg00001",
+          "name": "Threatmap Postgres"
+        }
+      },
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1
+            }
+          ]
+        }
+      },
+      "name": "Every day",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        700
+      ],
+      "id": "every-day"
+    },
+    {
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "url": "https://api.abuseipdb.com/api/v2/blacklist?confidenceMinimum=90&limit=10000",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "n8n-threatmap/0.1 (threat-intel research)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "AbuseIPDB: blacklist",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        700
+      ],
+      "id": "abuseipdb-blacklist",
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "AbuseIpdbKey0001",
+          "name": "AbuseIPDB API key (Key)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// AbuseIPDB blacklist ({meta, data: [{ipAddress, abuseConfidenceScore, ...}]})\n// into ip_sightings rows. A failed download carries `error` and yields nothing.\nconst rows = [];\nfor (const { json } of $input.all()) {\n  if (json.error || !Array.isArray(json.data)) continue;\n  for (const d of json.data) {\n    if (!/^\\d{1,3}(\\.\\d{1,3}){3}$/.test(d.ipAddress ?? '')) continue; // IPv4 only, like the other feeds\n    rows.push({\n      source: 'abuseipdb',\n      ip: d.ipAddress,\n      details: { score: d.abuseConfidenceScore, country: d.countryCode, last_reported: d.lastReportedAt },\n    });\n  }\n}\nreturn rows.length ? [{ json: { rows } }] : [];\n"
+      },
+      "name": "AbuseIPDB rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        700
+      ],
+      "id": "abuseipdb-rows"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with up as (\n  insert into ip_sightings (source, ip, details)\n  select distinct on (r.source, r.ip) r.source, r.ip::inet, coalesce(r.details, '{}')\n  from jsonb_to_recordset($1::jsonb) as r(source text, ip text, details jsonb)\n  on conflict (source, ip, seen_on)\n  do update set details = excluded.details, last_ingested_at = now()\n  returning source\n)\nselect source, count(*) as upserted from up group by source",
+        "options": {
+          "queryReplacement": "={{ [ JSON.stringify($json.rows) ] }}"
+        }
+      },
+      "name": "PG: upsert AbuseIPDB sightings",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        660,
+        700
+      ],
+      "id": "pg-upsert-abuseipdb-sightings",
+      "credentials": {
+        "postgres": {
+          "id": "ThreatmapPg00001",
+          "name": "Threatmap Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "url": "=https://otx.alienvault.com/api/v1/pulses/subscribed?limit=100&modified_since={{ $now.minus({ days: 3 }).toUTC().toFormat(\"yyyy-MM-dd'T'HH:mm:ss\") }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "n8n-threatmap/0.1 (threat-intel research)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "OTX: subscribed pulses",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        500
+      ],
+      "id": "otx-subscribed-pulses",
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "OtxApiKey0000001",
+          "name": "AlienVault OTX API key (X-OTX-API-KEY)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// IPv4 indicators from OTX subscribed pulses into ip_sightings rows. One row\n// per IP, listing up to 5 of the pulses that mention it.\nconst byIp = new Map();\nfor (const { json } of $input.all()) {\n  if (json.error || !Array.isArray(json.results)) continue;\n  for (const pulse of json.results) {\n    for (const ind of pulse.indicators ?? []) {\n      if (ind.type !== 'IPv4') continue;\n      const row = byIp.get(ind.indicator) ?? { source: 'otx', ip: ind.indicator, details: { pulses: [] } };\n      if (row.details.pulses.length < 5) {\n        row.details.pulses.push({\n          id: pulse.id, name: pulse.name, author: pulse.author_name,\n          tags: (pulse.tags ?? []).slice(0, 10), modified: pulse.modified,\n        });\n      }\n      byIp.set(ind.indicator, row);\n    }\n  }\n}\nreturn byIp.size ? [{ json: { rows: [...byIp.values()] } }] : [];\n"
+      },
+      "name": "OTX rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        500
+      ],
+      "id": "otx-rows"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with up as (\n  insert into ip_sightings (source, ip, details)\n  select distinct on (r.source, r.ip) r.source, r.ip::inet, coalesce(r.details, '{}')\n  from jsonb_to_recordset($1::jsonb) as r(source text, ip text, details jsonb)\n  on conflict (source, ip, seen_on)\n  do update set details = excluded.details, last_ingested_at = now()\n  returning source\n)\nselect source, count(*) as upserted from up group by source",
+        "options": {
+          "queryReplacement": "={{ [ JSON.stringify($json.rows) ] }}"
+        }
+      },
+      "name": "PG: upsert OTX sightings",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        660,
+        500
+      ],
+      "id": "pg-upsert-otx-sightings",
+      "credentials": {
+        "postgres": {
+          "id": "ThreatmapPg00001",
+          "name": "Threatmap Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Threat map: IP feeds\n\nHourly. Each IP is stored once per feed per day in `ip_sightings`.\n\n- **DShield** (SANS ISC): top 500 attacking IPs reported by sensors worldwide.\n- **Feodo Tracker** (abuse.ch): botnet C2 servers.\n- **blocklist.de**: ~25k IPs reported for SSH/mail/web attacks in the last 48 h.\n- **AlienVault OTX** (hourly, needs the key): IPv4 indicators from pulses modified in the last 3 days by authors the OTX account follows.\n- **AbuseIPDB blacklist** (daily, needs the key): 10k IPs with abuse confidence ≥ 90. The free plan allows 5 blacklist downloads a day, and *Run now* uses one.\n\nA feed that fails is skipped; the others still load. *PG: retention* keeps 30 days of `attack_events` and 90 days of sightings.",
+        "height": 400,
+        "width": 560,
+        "color": 4
+      },
+      "name": "Read me",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -160
+      ],
+      "id": "read-me"
+    }
+  ],
+  "connections": {
+    "Every hour": {
+      "main": [
+        [
+          {
+            "node": "DShield: top attackers",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "OTX: subscribed pulses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DShield: top attackers": {
+      "main": [
+        [
+          {
+            "node": "Feodo: C2 blocklist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Feodo: C2 blocklist": {
+      "main": [
+        [
+          {
+            "node": "blocklist.de: all",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "blocklist.de: all": {
+      "main": [
+        [
+          {
+            "node": "Combine feeds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine feeds": {
+      "main": [
+        [
+          {
+            "node": "PG: upsert sightings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG: upsert sightings": {
+      "main": [
+        [
+          {
+            "node": "PG: retention",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every day": {
+      "main": [
+        [
+          {
+            "node": "AbuseIPDB: blacklist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AbuseIPDB: blacklist": {
+      "main": [
+        [
+          {
+            "node": "AbuseIPDB rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AbuseIPDB rows": {
+      "main": [
+        [
+          {
+            "node": "PG: upsert AbuseIPDB sightings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OTX: subscribed pulses": {
+      "main": [
+        [
+          {
+            "node": "OTX rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OTX rows": {
+      "main": [
+        [
+          {
+            "node": "PG: upsert OTX sightings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run now": {
+      "main": [
+        [
+          {
+            "node": "DShield: top attackers",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "OTX: subscribed pulses",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "AbuseIPDB: blacklist",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all"
+  },
+  "tags": []
+}

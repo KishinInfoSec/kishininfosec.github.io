@@ -1,0 +1,16 @@
+title: Kishin InfoSec
+description: n8n workflows, Grafana dashboards and other homelab templates for security monitoring and threat intel. Free to use, MIT licensed.
+url: https://kishininfosec.github.io
+github: https://github.com/KishinInfoSec/kishininfosec.github.io
+markdown: kramdown
+kramdown:
+  input: GFM
+plugins:
+  - jekyll-relative-links
+  - jekyll-optional-front-matter
+relative_links:
+  enabled: true
+exclude:
+  - README.md
+  - CONTRIBUTING.md
+  - _site

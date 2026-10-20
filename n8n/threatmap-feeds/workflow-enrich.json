@@ -1,0 +1,826 @@
+{
+  "name": "Threat map: enrich IPs",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "Run now",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        1000
+      ],
+      "id": "run-now"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "name": "Every 5 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "id": "every-5-minutes"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "name": "Every hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        760
+      ],
+      "id": "every-hour"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select host(s.ip) as ip\nfrom (\n  select ip,\n         min(case when source in ('feodo', 'dshield') then 0 else 1 end) as prio,\n         max(last_ingested_at) as recent\n  from ip_sightings\n  where seen_on >= current_date - 7\n  group by ip\n) s\nleft join enrichment e on e.ip = s.ip and e.provider = 'ipapi'\nwhere e.ip is null or e.expires_at < now()\norder by s.prio, s.recent desc\nlimit 100",
+        "options": {}
+      },
+      "name": "PG: IPs needing geo",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        220,
+        200
+      ],
+      "id": "pg-ips-needing-geo",
+      "credentials": {
+        "postgres": {
+          "id": "ThreatmapPg00001",
+          "name": "Threatmap Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// One ip-api.com batch request body for up to 100 IPs.\nconst fields = 'status,message,query,country,countryCode,regionName,city,lat,lon,isp,org,as,hosting';\nconst batch = $input.all().map((it) => ({ query: it.json.ip, fields })).filter((b) => b.query);\nreturn batch.length ? [{ json: { batch } }] : [];\n"
+      },
+      "name": "Build ip-api batch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        200
+      ],
+      "id": "build-ip-api-batch"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://ip-api.com/batch",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.batch) }}",
+        "options": {}
+      },
+      "name": "ip-api: batch geo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        200
+      ],
+      "id": "ip-api-batch-geo"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// ip-api batch answers come back one item per IP. status \"fail\" means a\n// private/reserved address or no data, cached as not_found.\nconst rows = $input.all()\n  .filter((it) => it.json.query)\n  .map((it) => ({\n    ip: it.json.query,\n    provider: 'ipapi',\n    status: it.json.status === 'success' ? 'ok' : 'not_found',\n    data: it.json,\n    ttl_days: 30,\n  }));\nreturn rows.length ? [{ json: { rows } }] : [];\n"
+      },
+      "name": "Geo rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        200
+      ],
+      "id": "geo-rows"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with up as (\n  insert into enrichment (ip, provider, status, data, expires_at)\n  select distinct on (r.ip, r.provider) r.ip::inet, r.provider, r.status, coalesce(r.data, '{}'),\n         now() + make_interval(days => r.ttl_days)\n  from jsonb_to_recordset($1::jsonb) as r(ip text, provider text, status text, data jsonb, ttl_days int)\n  on conflict (ip, provider)\n  do update set status = excluded.status, data = excluded.data, fetched_at = now(),\n                expires_at = excluded.expires_at\n  returning status\n)\nselect status, count(*) as saved from up group by status",
+        "options": {
+          "queryReplacement": "={{ [ JSON.stringify($json.rows) ] }}"
+        }
+      },
+      "name": "PG: save geo",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1100,
+        200
+      ],
+      "id": "pg-save-geo",
+      "credentials": {
+        "postgres": {
+          "id": "ThreatmapPg00001",
+          "name": "Threatmap Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select host(s.ip) as ip\nfrom (\n  select ip,\n         min(case when source in ('feodo', 'dshield') then 0 else 1 end) as prio,\n         max(last_ingested_at) as recent\n  from ip_sightings\n  where seen_on >= current_date - 7\n  group by ip\n) s\nleft join enrichment e on e.ip = s.ip and e.provider = 'internetdb'\nwhere e.ip is null or e.expires_at < now()\norder by s.prio, s.recent desc\nlimit 30",
+        "options": {}
+      },
+      "name": "PG: IPs needing InternetDB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        220,
+        460
+      ],
+      "id": "pg-ips-needing-internetdb",
+      "credentials": {
+        "postgres": {
+          "id": "ThreatmapPg00001",
+          "name": "Threatmap Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://internetdb.shodan.io/{{ $json.ip }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "n8n-threatmap/0.1 (threat-intel research)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1100
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "name": "Shodan InternetDB: lookup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        460
+      ],
+      "id": "shodan-internetdb-lookup"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const SOURCE_NODE = \"PG: IPs needing InternetDB\";\nconst PROVIDER = \"internetdb\";\nconst TTL_DAYS = 7;\n// Turn per-IP lookups (HTTP node with full response + never error) into\n// enrichment rows. 200 = ok, 404 = provider has nothing on the IP (cached as\n// not_found so it is not asked again until expiry); anything else (429 rate\n// limit, 5xx) is dropped so the IP is retried on a later run.\n// SOURCE_NODE, PROVIDER, TTL_DAYS and an optional TRANSFORM(body) are prepended by build.py.\nconst ips = $(SOURCE_NODE).all().map((it) => it.json.ip);\nconst rows = [];\n\n// AbuseIPDB wraps its answer in {data: {...}}; the others return the object directly.\nfunction unwrap(body) {\n  if (typeof body !== 'object' || body === null) return {};\n  return body.data && typeof body.data === 'object' && !Array.isArray(body.data) ? body.data : body;\n}\n\n$input.all().forEach((it, i) => {\n  const status = it.json.statusCode;\n  if (status !== 200 && status !== 404) return;\n  rows.push({\n    ip: ips[i],\n    provider: PROVIDER,\n    status: status === 200 ? 'ok' : 'not_found',\n    data: typeof TRANSFORM === 'function' ? TRANSFORM(unwrap(it.json.body)) : unwrap(it.json.body),\n    ttl_days: TTL_DAYS,\n  });\n});\n\nreturn rows.length ? [{ json: { rows } }] : [];\n"
+      },
+      "name": "InternetDB rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        460
+      ],
+      "id": "internetdb-rows"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with up as (\n  insert into enrichment (ip, provider, status, data, expires_at)\n  select distinct on (r.ip, r.provider) r.ip::inet, r.provider, r.status, coalesce(r.data, '{}'),\n         now() + make_interval(days => r.ttl_days)\n  from jsonb_to_recordset($1::jsonb) as r(ip text, provider text, status text, data jsonb, ttl_days int)\n  on conflict (ip, provider)\n  do update set status = excluded.status, data = excluded.data, fetched_at = now(),\n                expires_at = excluded.expires_at\n  returning status\n)\nselect status, count(*) as saved from up group by status",
+        "options": {
+          "queryReplacement": "={{ [ JSON.stringify($json.rows) ] }}"
+        }
+      },
+      "name": "PG: save InternetDB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        880,
+        460
+      ],
+      "id": "pg-save-internetdb",
+      "credentials": {
+        "postgres": {
+          "id": "ThreatmapPg00001",
+          "name": "Threatmap Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select host(s.ip) as ip\nfrom (\n  select ip,\n         min(case when source in ('feodo', 'dshield') then 0 else 1 end) as prio,\n         max(last_ingested_at) as recent\n  from ip_sightings\n  where seen_on >= current_date - 7\n  group by ip\n) s\nleft join enrichment e on e.ip = s.ip and e.provider = 'greynoise'\nwhere e.ip is null or e.expires_at < now()\norder by s.prio, s.recent desc\nlimit 1",
+        "options": {}
+      },
+      "name": "PG: IP needing GreyNoise",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        220,
+        760
+      ],
+      "id": "pg-ip-needing-greynoise",
+      "credentials": {
+        "postgres": {
+          "id": "ThreatmapPg00001",
+          "name": "Threatmap Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://api.greynoise.io/v3/community/{{ $json.ip }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "n8n-threatmap/0.1 (threat-intel research)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1000
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "name": "GreyNoise: community lookup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        760
+      ],
+      "id": "greynoise-community-lookup"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const SOURCE_NODE = \"PG: IP needing GreyNoise\";\nconst PROVIDER = \"greynoise\";\nconst TTL_DAYS = 7;\n// Turn per-IP lookups (HTTP node with full response + never error) into\n// enrichment rows. 200 = ok, 404 = provider has nothing on the IP (cached as\n// not_found so it is not asked again until expiry); anything else (429 rate\n// limit, 5xx) is dropped so the IP is retried on a later run.\n// SOURCE_NODE, PROVIDER, TTL_DAYS and an optional TRANSFORM(body) are prepended by build.py.\nconst ips = $(SOURCE_NODE).all().map((it) => it.json.ip);\nconst rows = [];\n\n// AbuseIPDB wraps its answer in {data: {...}}; the others return the object directly.\nfunction unwrap(body) {\n  if (typeof body !== 'object' || body === null) return {};\n  return body.data && typeof body.data === 'object' && !Array.isArray(body.data) ? body.data : body;\n}\n\n$input.all().forEach((it, i) => {\n  const status = it.json.statusCode;\n  if (status !== 200 && status !== 404) return;\n  rows.push({\n    ip: ips[i],\n    provider: PROVIDER,\n    status: status === 200 ? 'ok' : 'not_found',\n    data: typeof TRANSFORM === 'function' ? TRANSFORM(unwrap(it.json.body)) : unwrap(it.json.body),\n    ttl_days: TTL_DAYS,\n  });\n});\n\nreturn rows.length ? [{ json: { rows } }] : [];\n"
+      },
+      "name": "GreyNoise rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        760
+      ],
+      "id": "greynoise-rows"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with up as (\n  insert into enrichment (ip, provider, status, data, expires_at)\n  select distinct on (r.ip, r.provider) r.ip::inet, r.provider, r.status, coalesce(r.data, '{}'),\n         now() + make_interval(days => r.ttl_days)\n  from jsonb_to_recordset($1::jsonb) as r(ip text, provider text, status text, data jsonb, ttl_days int)\n  on conflict (ip, provider)\n  do update set status = excluded.status, data = excluded.data, fetched_at = now(),\n                expires_at = excluded.expires_at\n  returning status\n)\nselect status, count(*) as saved from up group by status",
+        "options": {
+          "queryReplacement": "={{ [ JSON.stringify($json.rows) ] }}"
+        }
+      },
+      "name": "PG: save GreyNoise",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        880,
+        760
+      ],
+      "id": "pg-save-greynoise",
+      "credentials": {
+        "postgres": {
+          "id": "ThreatmapPg00001",
+          "name": "Threatmap Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select host(s.ip) as ip\nfrom (\n  select ip,\n         min(case when source in ('feodo', 'dshield') then 0 else 1 end) as prio,\n         max(last_ingested_at) as recent\n  from ip_sightings\n  where seen_on >= current_date - 7\n  group by ip\n) s\nleft join enrichment e on e.ip = s.ip and e.provider = 'otx'\nwhere e.ip is null or e.expires_at < now()\norder by s.prio, s.recent desc\nlimit 30",
+        "options": {}
+      },
+      "name": "PG: IPs needing OTX",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1100,
+        760
+      ],
+      "id": "pg-ips-needing-otx",
+      "credentials": {
+        "postgres": {
+          "id": "ThreatmapPg00001",
+          "name": "Threatmap Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "url": "=https://otx.alienvault.com/api/v1/indicators/IPv4/{{ $json.ip }}/general",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "n8n-threatmap/0.1 (threat-intel research)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 500
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "name": "OTX: indicator lookup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        760
+      ],
+      "id": "otx-indicator-lookup",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "OtxApiKey0000001",
+          "name": "AlienVault OTX API key (X-OTX-API-KEY)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const SOURCE_NODE = \"PG: IPs needing OTX\";\nconst PROVIDER = \"otx\";\nconst TTL_DAYS = 7;\nconst TRANSFORM = (b) => ({\n  pulse_count: b.pulse_info?.count ?? 0,\n  pulses: (b.pulse_info?.pulses ?? []).slice(0, 10).map((p) => ({ id: p.id, name: p.name, tags: (p.tags ?? []).slice(0, 10) })),\n  reputation: b.reputation ?? null,\n  asn: b.asn ?? null,\n  country: b.country_code ?? null,\n  false_positive: b.false_positive ?? [],\n});\n// Turn per-IP lookups (HTTP node with full response + never error) into\n// enrichment rows. 200 = ok, 404 = provider has nothing on the IP (cached as\n// not_found so it is not asked again until expiry); anything else (429 rate\n// limit, 5xx) is dropped so the IP is retried on a later run.\n// SOURCE_NODE, PROVIDER, TTL_DAYS and an optional TRANSFORM(body) are prepended by build.py.\nconst ips = $(SOURCE_NODE).all().map((it) => it.json.ip);\nconst rows = [];\n\n// AbuseIPDB wraps its answer in {data: {...}}; the others return the object directly.\nfunction unwrap(body) {\n  if (typeof body !== 'object' || body === null) return {};\n  return body.data && typeof body.data === 'object' && !Array.isArray(body.data) ? body.data : body;\n}\n\n$input.all().forEach((it, i) => {\n  const status = it.json.statusCode;\n  if (status !== 200 && status !== 404) return;\n  rows.push({\n    ip: ips[i],\n    provider: PROVIDER,\n    status: status === 200 ? 'ok' : 'not_found',\n    data: typeof TRANSFORM === 'function' ? TRANSFORM(unwrap(it.json.body)) : unwrap(it.json.body),\n    ttl_days: TTL_DAYS,\n  });\n});\n\nreturn rows.length ? [{ json: { rows } }] : [];\n"
+      },
+      "name": "OTX lookup rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        760
+      ],
+      "id": "otx-lookup-rows"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with up as (\n  insert into enrichment (ip, provider, status, data, expires_at)\n  select distinct on (r.ip, r.provider) r.ip::inet, r.provider, r.status, coalesce(r.data, '{}'),\n         now() + make_interval(days => r.ttl_days)\n  from jsonb_to_recordset($1::jsonb) as r(ip text, provider text, status text, data jsonb, ttl_days int)\n  on conflict (ip, provider)\n  do update set status = excluded.status, data = excluded.data, fetched_at = now(),\n                expires_at = excluded.expires_at\n  returning status\n)\nselect status, count(*) as saved from up group by status",
+        "options": {
+          "queryReplacement": "={{ [ JSON.stringify($json.rows) ] }}"
+        }
+      },
+      "name": "PG: save OTX",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1760,
+        760
+      ],
+      "id": "pg-save-otx",
+      "credentials": {
+        "postgres": {
+          "id": "ThreatmapPg00001",
+          "name": "Threatmap Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "select host(s.ip) as ip\nfrom (\n  select ip,\n         min(case when source in ('feodo', 'dshield') then 0 else 1 end) as prio,\n         max(last_ingested_at) as recent\n  from ip_sightings\n  where seen_on >= current_date - 7\n  group by ip\n) s\nleft join enrichment e on e.ip = s.ip and e.provider = 'abuseipdb'\nwhere e.ip is null or e.expires_at < now()\norder by s.prio, s.recent desc\nlimit 3",
+        "options": {}
+      },
+      "name": "PG: IPs needing AbuseIPDB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1100,
+        460
+      ],
+      "id": "pg-ips-needing-abuseipdb",
+      "credentials": {
+        "postgres": {
+          "id": "ThreatmapPg00001",
+          "name": "Threatmap Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "url": "=https://api.abuseipdb.com/api/v2/check?maxAgeInDays=90&ipAddress={{ $json.ip }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "n8n-threatmap/0.1 (threat-intel research)"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1000
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "name": "AbuseIPDB: check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        460
+      ],
+      "id": "abuseipdb-check",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "AbuseIpdbKey0001",
+          "name": "AbuseIPDB API key (Key)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const SOURCE_NODE = \"PG: IPs needing AbuseIPDB\";\nconst PROVIDER = \"abuseipdb\";\nconst TTL_DAYS = 7;\n// Turn per-IP lookups (HTTP node with full response + never error) into\n// enrichment rows. 200 = ok, 404 = provider has nothing on the IP (cached as\n// not_found so it is not asked again until expiry); anything else (429 rate\n// limit, 5xx) is dropped so the IP is retried on a later run.\n// SOURCE_NODE, PROVIDER, TTL_DAYS and an optional TRANSFORM(body) are prepended by build.py.\nconst ips = $(SOURCE_NODE).all().map((it) => it.json.ip);\nconst rows = [];\n\n// AbuseIPDB wraps its answer in {data: {...}}; the others return the object directly.\nfunction unwrap(body) {\n  if (typeof body !== 'object' || body === null) return {};\n  return body.data && typeof body.data === 'object' && !Array.isArray(body.data) ? body.data : body;\n}\n\n$input.all().forEach((it, i) => {\n  const status = it.json.statusCode;\n  if (status !== 200 && status !== 404) return;\n  rows.push({\n    ip: ips[i],\n    provider: PROVIDER,\n    status: status === 200 ? 'ok' : 'not_found',\n    data: typeof TRANSFORM === 'function' ? TRANSFORM(unwrap(it.json.body)) : unwrap(it.json.body),\n    ttl_days: TTL_DAYS,\n  });\n});\n\nreturn rows.length ? [{ json: { rows } }] : [];\n"
+      },
+      "name": "AbuseIPDB rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        460
+      ],
+      "id": "abuseipdb-rows"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "with up as (\n  insert into enrichment (ip, provider, status, data, expires_at)\n  select distinct on (r.ip, r.provider) r.ip::inet, r.provider, r.status, coalesce(r.data, '{}'),\n         now() + make_interval(days => r.ttl_days)\n  from jsonb_to_recordset($1::jsonb) as r(ip text, provider text, status text, data jsonb, ttl_days int)\n  on conflict (ip, provider)\n  do update set status = excluded.status, data = excluded.data, fetched_at = now(),\n                expires_at = excluded.expires_at\n  returning status\n)\nselect status, count(*) as saved from up group by status",
+        "options": {
+          "queryReplacement": "={{ [ JSON.stringify($json.rows) ] }}"
+        }
+      },
+      "name": "PG: save AbuseIPDB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1760,
+        460
+      ],
+      "id": "pg-save-abuseipdb",
+      "credentials": {
+        "postgres": {
+          "id": "ThreatmapPg00001",
+          "name": "Threatmap Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Threat map: enrich IPs\n\nLooks up IPs from `ip_sightings` that have no fresh row in `enrichment`. C2 (Feodo) and DShield IPs go first.\n\n| Provider | Gives | Per run | Cache |\n|---|---|---|---|\n| ip-api.com batch | geo, ASN, hosting flag | 100 / 5 min | 30 d |\n| Shodan InternetDB | open ports, CPEs, CVEs, tags | 30 / 5 min, 1/s | 7 d |\n| GreyNoise community | scanner vs targeted, malicious/benign | **1 / hour** | 7 d |\n| AbuseIPDB check | abuse score, report count, usage type, Tor flag | 3 / 5 min (864 of 1000/day) | 7 d |\n| AlienVault OTX | pulse count, pulse names/tags, reputation | 30 / 5 min, 2/s | 7 d |\n\nGreyNoise without a key allows **25 lookups a day**, hence hourly. Add a key (header `key`) to raise it. A 429 or 5xx is not cached, so the IP is retried later.",
+        "height": 420,
+        "width": 620,
+        "color": 4
+      },
+      "name": "Read me",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -260
+      ],
+      "id": "read-me"
+    }
+  ],
+  "connections": {
+    "Every 5 minutes": {
+      "main": [
+        [
+          {
+            "node": "PG: IPs needing geo",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "PG: IPs needing InternetDB",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "PG: IPs needing AbuseIPDB",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "PG: IPs needing OTX",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG: IPs needing geo": {
+      "main": [
+        [
+          {
+            "node": "Build ip-api batch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build ip-api batch": {
+      "main": [
+        [
+          {
+            "node": "ip-api: batch geo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ip-api: batch geo": {
+      "main": [
+        [
+          {
+            "node": "Geo rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Geo rows": {
+      "main": [
+        [
+          {
+            "node": "PG: save geo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG: IPs needing InternetDB": {
+      "main": [
+        [
+          {
+            "node": "Shodan InternetDB: lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shodan InternetDB: lookup": {
+      "main": [
+        [
+          {
+            "node": "InternetDB rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "InternetDB rows": {
+      "main": [
+        [
+          {
+            "node": "PG: save InternetDB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every hour": {
+      "main": [
+        [
+          {
+            "node": "PG: IP needing GreyNoise",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run now": {
+      "main": [
+        [
+          {
+            "node": "PG: IPs needing geo",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "PG: IPs needing InternetDB",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "PG: IP needing GreyNoise",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "PG: IPs needing AbuseIPDB",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "PG: IPs needing OTX",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG: IPs needing OTX": {
+      "main": [
+        [
+          {
+            "node": "OTX: indicator lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OTX: indicator lookup": {
+      "main": [
+        [
+          {
+            "node": "OTX lookup rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OTX lookup rows": {
+      "main": [
+        [
+          {
+            "node": "PG: save OTX",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG: IPs needing AbuseIPDB": {
+      "main": [
+        [
+          {
+            "node": "AbuseIPDB: check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AbuseIPDB: check": {
+      "main": [
+        [
+          {
+            "node": "AbuseIPDB rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AbuseIPDB rows": {
+      "main": [
+        [
+          {
+            "node": "PG: save AbuseIPDB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PG: IP needing GreyNoise": {
+      "main": [
+        [
+          {
+            "node": "GreyNoise: community lookup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GreyNoise: community lookup": {
+      "main": [
+        [
+          {
+            "node": "GreyNoise rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GreyNoise rows": {
+      "main": [
+        [
+          {
+            "node": "PG: save GreyNoise",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all"
+  },
+  "tags": []
+}
