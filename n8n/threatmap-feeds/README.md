@@ -22,6 +22,8 @@ Three n8n workflows that load public threat data into Postgres. The schema is in
 
 ![Threat map Fortinet attack events workflow](../../n8n-fortinet-map-events.png)
 
+![Threat map IP feeds workflow](../../n8n-ip-feed-events.png)
+
 ![Threat map IP enrichment workflow](../../n8n-ip-enrichment.png)
 
 Repeats are dropped in SQL. Enrichment is cached per IP and provider, for 30 days for geo and 7 days for the others, so quotas are never spent twice on the same IP. A 429 or 5xx response is not cached, so that IP is retried on a later run.
