@@ -97,6 +97,7 @@ button.copy {
 .prose { overflow-wrap: break-word; }
 .prose h1 { font-family: var(--mono); font-size: 1.7rem; letter-spacing: -0.01em; }
 .prose h2 { font-size: 1.2rem; margin-top: 2em; }
+.prose img { display: block; max-width: 100%; height: auto; border: 1px solid var(--border); border-radius: 6px; }
 .prose table { border-collapse: collapse; display: block; overflow-x: auto; font-size: 0.92rem; }
 .prose th, .prose td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
 code { font-family: var(--mono); font-size: 0.88em; background: var(--code-bg); padding: 1px 5px; border-radius: 3px; }
