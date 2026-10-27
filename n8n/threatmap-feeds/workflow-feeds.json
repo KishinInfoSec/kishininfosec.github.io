@@ -1,4 +1,5 @@
 {
+  "id": "ThreatmapFeeds01",
   "name": "Threat map: IP feeds",
   "active": false,
   "nodes": [
@@ -148,7 +149,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "with up as (\n  insert into ip_sightings (source, ip, details)\n  select distinct on (r.source, r.ip) r.source, r.ip::inet, coalesce(r.details, '{}')\n  from jsonb_to_recordset($1::jsonb) as r(source text, ip text, details jsonb)\n  on conflict (source, ip, seen_on)\n  do update set details = excluded.details, last_ingested_at = now()\n  returning source\n)\nselect source, count(*) as upserted from up group by source",
+        "query": "with up as (\n  insert into ip_sightings (source, ip, details)\n  select distinct on (r.source, r.ip) r.source, r.ip::inet, coalesce(r.details, '{}')\n  from jsonb_to_recordset($1::jsonb) as r(source text, ip text, details jsonb)\n  -- private, loopback, CGNAT, link-local, documentation, multicast and reserved ranges\n  where not r.ip::inet <<= any ('{0.0.0.0/8,10.0.0.0/8,100.64.0.0/10,127.0.0.0/8,169.254.0.0/16,172.16.0.0/12,192.0.0.0/24,192.0.2.0/24,192.168.0.0/16,198.18.0.0/15,198.51.100.0/24,203.0.113.0/24,224.0.0.0/3}'::inet[])\n  on conflict (source, ip, seen_on)\n  do update set details = excluded.details, last_ingested_at = now()\n  returning source\n)\nselect source, count(*) as upserted from up group by source",
         "options": {
           "queryReplacement": "={{ [ JSON.stringify($json.rows) ] }}"
         }
@@ -263,7 +264,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "with up as (\n  insert into ip_sightings (source, ip, details)\n  select distinct on (r.source, r.ip) r.source, r.ip::inet, coalesce(r.details, '{}')\n  from jsonb_to_recordset($1::jsonb) as r(source text, ip text, details jsonb)\n  on conflict (source, ip, seen_on)\n  do update set details = excluded.details, last_ingested_at = now()\n  returning source\n)\nselect source, count(*) as upserted from up group by source",
+        "query": "with up as (\n  insert into ip_sightings (source, ip, details)\n  select distinct on (r.source, r.ip) r.source, r.ip::inet, coalesce(r.details, '{}')\n  from jsonb_to_recordset($1::jsonb) as r(source text, ip text, details jsonb)\n  -- private, loopback, CGNAT, link-local, documentation, multicast and reserved ranges\n  where not r.ip::inet <<= any ('{0.0.0.0/8,10.0.0.0/8,100.64.0.0/10,127.0.0.0/8,169.254.0.0/16,172.16.0.0/12,192.0.0.0/24,192.0.2.0/24,192.168.0.0/16,198.18.0.0/15,198.51.100.0/24,203.0.113.0/24,224.0.0.0/3}'::inet[])\n  on conflict (source, ip, seen_on)\n  do update set details = excluded.details, last_ingested_at = now()\n  returning source\n)\nselect source, count(*) as upserted from up group by source",
         "options": {
           "queryReplacement": "={{ [ JSON.stringify($json.rows) ] }}"
         }
@@ -336,7 +337,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "with up as (\n  insert into ip_sightings (source, ip, details)\n  select distinct on (r.source, r.ip) r.source, r.ip::inet, coalesce(r.details, '{}')\n  from jsonb_to_recordset($1::jsonb) as r(source text, ip text, details jsonb)\n  on conflict (source, ip, seen_on)\n  do update set details = excluded.details, last_ingested_at = now()\n  returning source\n)\nselect source, count(*) as upserted from up group by source",
+        "query": "with up as (\n  insert into ip_sightings (source, ip, details)\n  select distinct on (r.source, r.ip) r.source, r.ip::inet, coalesce(r.details, '{}')\n  from jsonb_to_recordset($1::jsonb) as r(source text, ip text, details jsonb)\n  -- private, loopback, CGNAT, link-local, documentation, multicast and reserved ranges\n  where not r.ip::inet <<= any ('{0.0.0.0/8,10.0.0.0/8,100.64.0.0/10,127.0.0.0/8,169.254.0.0/16,172.16.0.0/12,192.0.0.0/24,192.0.2.0/24,192.168.0.0/16,198.18.0.0/15,198.51.100.0/24,203.0.113.0/24,224.0.0.0/3}'::inet[])\n  on conflict (source, ip, seen_on)\n  do update set details = excluded.details, last_ingested_at = now()\n  returning source\n)\nselect source, count(*) as upserted from up group by source",
         "options": {
           "queryReplacement": "={{ [ JSON.stringify($json.rows) ] }}"
         }
@@ -526,5 +527,6 @@
     "executionOrder": "v1",
     "saveDataSuccessExecution": "all"
   },
+  "pinData": {},
   "tags": []
 }

@@ -1,4 +1,5 @@
 {
+  "id": "ThreatmapEnrich1",
   "name": "Threat map: enrich IPs",
   "active": false,
   "nodes": [
@@ -104,7 +105,11 @@
         660,
         200
       ],
-      "id": "ip-api-batch-geo"
+      "id": "ip-api-batch-geo",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -203,7 +208,8 @@
         440,
         460
       ],
-      "id": "shodan-internetdb-lookup"
+      "id": "shodan-internetdb-lookup",
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -302,7 +308,8 @@
         440,
         760
       ],
-      "id": "greynoise-community-lookup"
+      "id": "greynoise-community-lookup",
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -391,9 +398,10 @@
             "response": {
               "fullResponse": true,
               "neverError": true,
-              "responseFormat": "json"
+              "responseFormat": "text"
             }
-          }
+          },
+          "timeout": 20000
         }
       },
       "name": "OTX: indicator lookup",
@@ -409,12 +417,13 @@
           "id": "OtxApiKey0000001",
           "name": "AlienVault OTX API key (X-OTX-API-KEY)"
         }
-      }
+      },
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const SOURCE_NODE = \"PG: IPs needing OTX\";\nconst PROVIDER = \"otx\";\nconst TTL_DAYS = 7;\nconst TRANSFORM = (b) => ({\n  pulse_count: b.pulse_info?.count ?? 0,\n  pulses: (b.pulse_info?.pulses ?? []).slice(0, 10).map((p) => ({ id: p.id, name: p.name, tags: (p.tags ?? []).slice(0, 10) })),\n  reputation: b.reputation ?? null,\n  asn: b.asn ?? null,\n  country: b.country_code ?? null,\n  false_positive: b.false_positive ?? [],\n});\n// Turn per-IP lookups (HTTP node with full response + never error) into\n// enrichment rows. 200 = ok, 404 = provider has nothing on the IP (cached as\n// not_found so it is not asked again until expiry); anything else (429 rate\n// limit, 5xx) is dropped so the IP is retried on a later run.\n// SOURCE_NODE, PROVIDER, TTL_DAYS and an optional TRANSFORM(body) are prepended by build.py.\nconst ips = $(SOURCE_NODE).all().map((it) => it.json.ip);\nconst rows = [];\n\n// AbuseIPDB wraps its answer in {data: {...}}; the others return the object directly.\nfunction unwrap(body) {\n  if (typeof body !== 'object' || body === null) return {};\n  return body.data && typeof body.data === 'object' && !Array.isArray(body.data) ? body.data : body;\n}\n\n$input.all().forEach((it, i) => {\n  const status = it.json.statusCode;\n  if (status !== 200 && status !== 404) return;\n  rows.push({\n    ip: ips[i],\n    provider: PROVIDER,\n    status: status === 200 ? 'ok' : 'not_found',\n    data: typeof TRANSFORM === 'function' ? TRANSFORM(unwrap(it.json.body)) : unwrap(it.json.body),\n    ttl_days: TTL_DAYS,\n  });\n});\n\nreturn rows.length ? [{ json: { rows } }] : [];\n"
+        "jsCode": "const SOURCE_NODE = \"PG: IPs needing OTX\";\nconst PROVIDER = \"otx\";\nconst TTL_DAYS = 7;\nconst TRANSFORM = (b) => ({\n  pulse_count: b.pulse_info?.count ?? 0,\n  pulses: (b.pulse_info?.pulses ?? []).slice(0, 10).map((p) => ({ id: p.id, name: p.name, tags: (p.tags ?? []).slice(0, 10) })),\n  reputation: b.reputation ?? null,\n  asn: b.asn ?? null,\n  country: b.country_code ?? null,\n  false_positive: b.false_positive ?? [],\n});\n// Turn per-IP lookups (HTTP node with full response + never error) into\n// enrichment rows. 200 = ok, 404 = provider has nothing on the IP (cached as\n// not_found so it is not asked again until expiry); anything else (429 rate\n// limit, 5xx) is dropped so the IP is retried on a later run.\n// OTX is fetched as text because it sometimes answers with a non-JSON body\n// (error page); those answers are dropped and retried like a 5xx.\nconst ips = $(SOURCE_NODE).all().map((it) => it.json.ip);\nconst rows = [];\n\nfunction parse(body) {\n  if (typeof body !== 'string') return body;\n  try { return JSON.parse(body); } catch { return undefined; }\n}\n\n// AbuseIPDB wraps its answer in {data: {...}}; the others return the object directly.\nfunction unwrap(body) {\n  if (typeof body !== 'object' || body === null) return {};\n  return body.data && typeof body.data === 'object' && !Array.isArray(body.data) ? body.data : body;\n}\n\n$input.all().forEach((it, i) => {\n  const status = it.json.statusCode;\n  if (status !== 200 && status !== 404) return;\n  const body = parse(it.json.body ?? it.json.data);\n  if (status === 200 && (typeof body !== 'object' || body === null)) return;\n  rows.push({\n    ip: ips[i],\n    provider: PROVIDER,\n    status: status === 200 ? 'ok' : 'not_found',\n    data: status === 200 ? TRANSFORM(unwrap(body)) : {},\n    ttl_days: TTL_DAYS,\n  });\n});\n\nreturn rows.length ? [{ json: { rows } }] : [];\n"
       },
       "name": "OTX lookup rows",
       "type": "n8n-nodes-base.code",
@@ -516,7 +525,8 @@
           "id": "AbuseIpdbKey0001",
           "name": "AbuseIPDB API key (Key)"
         }
-      }
+      },
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -822,5 +832,6 @@
     "executionOrder": "v1",
     "saveDataSuccessExecution": "all"
   },
+  "pinData": {},
   "tags": []
 }

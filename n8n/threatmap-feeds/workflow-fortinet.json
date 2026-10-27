@@ -1,4 +1,5 @@
 {
+  "id": "ThreatmapFtnt001",
   "name": "Threat map: Fortinet attack events",
   "active": false,
   "nodes": [
@@ -58,7 +59,10 @@
         220,
         300
       ],
-      "id": "fortinet-live-outbreak-events"
+      "id": "fortinet-live-outbreak-events",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
     },
     {
       "parameters": {
@@ -164,5 +168,6 @@
     "executionOrder": "v1",
     "saveDataSuccessExecution": "all"
   },
+  "pinData": {},
   "tags": []
 }
